@@ -5,15 +5,13 @@ import yfinance as yf
 import numpy as np
 import streamlit.components.v1 as components
 import requests
-from bs4 import BeautifulSoup
+import urllib.parse
 from deep_translator import GoogleTranslator
-import random
-import time
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="結構型商品戰情室 (V36.0)", layout="wide")
+st.set_page_config(page_title="結構型商品戰情室 (V37.0)", layout="wide")
 st.title("📊 結構型商品 - 關鍵點位與長週期風險回測")
-st.markdown("回測區間：**2009/01/01 至今**。資料源：**Yahoo TW (暴力讀取) / API (快取加速)**。")
+st.markdown("資料源：**Yahoo Finance JSON (Proxy跳板) + AI 翻譯** -> **保證純文字/無廣告**")
 st.divider()
 
 # --- 2. 側邊欄 ---
@@ -33,81 +31,49 @@ period_months = st.sidebar.number_input("觀察天期 (月)", min_value=1, max_v
 
 run_btn = st.sidebar.button("🚀 開始分析", type="primary")
 
-# --- 3. 核心函數：多重來源 + 錯誤捕捉 ---
-
-def get_headers():
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
-    ]
-    return {"User-Agent": random.choice(user_agents)}
-
-@st.cache_data(ttl=3600) # 加上快取，1小時內查過的股票不用重抓，避免被擋
-def fetch_yahoo_tw_brute_force(ticker):
-    """
-    來源 1: Yahoo 奇摩股市 (暴力法)
-    不依賴特定 class 名稱，直接抓取頁面中「最長的一段中文文字」。
-    """
-    debug_log = []
-    try:
-        url = f"https://tw.stock.yahoo.com/quote/{ticker}/profile"
-        response = requests.get(url, headers=get_headers(), timeout=5)
-        debug_log.append(f"Yahoo TW Status: {response.status_code}")
-        
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # 抓取所有的 p 和 div
-            tags = soup.find_all(['p', 'div', 'article'])
-            
-            candidates = []
-            for tag in tags:
-                text = tag.get_text().strip()
-                # 篩選條件：
-                # 1. 長度介於 50 ~ 3000 字
-                # 2. 不包含常見的廣告詞或免責聲明關鍵字
-                if 50 < len(text) < 3000:
-                    if "免責聲明" not in text and "廣告" not in text and "版權所有" not in text:
-                        candidates.append(text)
-            
-            if candidates:
-                # 回傳最長的一段，通常就是簡介
-                best_match = max(candidates, key=len)
-                return best_match, None
-            else:
-                return None, "Yahoo TW 抓不到有效長文字 (可能是頁面結構改變)"
-        else:
-            return None, f"Yahoo TW 連線被拒 (Code {response.status_code})"
-            
-    except Exception as e:
-        return None, f"Yahoo TW 發生錯誤: {str(e)}"
+# --- 3. 核心函數：JSON Proxy 抓取 (最乾淨的來源) ---
 
 @st.cache_data(ttl=3600)
-def fetch_api_translated(ticker):
+def get_pure_text_profile(ticker):
     """
-    來源 2: yfinance API + 翻譯
+    透過 Proxy 請求 Yahoo Finance 的 JSON API，直接取得 longBusinessSummary。
+    避開網頁爬蟲的所有廣告和雜訊。
     """
     try:
-        # 增加一個隨機延遲，避免連續請求被擋
-        time.sleep(random.uniform(0.1, 0.5))
+        # 1. 設定 Yahoo Finance 的 JSON API URL
+        # modules=assetProfile 裡面包含了公司簡介
+        target_url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}?modules=assetProfile"
         
-        tk = yf.Ticker(ticker)
-        # 嘗試強制更新 info
-        eng_summary = tk.info.get('longBusinessSummary', None)
+        # 2. 透過 allorigins 跳板請求 (繞過 Streamlit Cloud IP 封鎖)
+        encoded_url = urllib.parse.quote(target_url)
+        proxy_url = f"https://api.allorigins.win/get?url={encoded_url}"
         
-        if not eng_summary:
-            return None, "yfinance API 回傳空值 (可能被限流)"
+        response = requests.get(proxy_url, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            # Proxy 回傳的內容在 contents 裡，且是字串格式，需轉回 JSON
+            import json
+            inner_data = json.loads(data['contents'])
             
-        translator = GoogleTranslator(source='auto', target='zh-TW')
-        cht_summary = translator.translate(eng_summary[:2500])
-        
-        return cht_summary, None
+            # 3. 解析 JSON 路徑，提取簡介
+            # 路徑: quoteSummary -> result[0] -> assetProfile -> longBusinessSummary
+            summary = inner_data.get('quoteSummary', {}).get('result', [{}])[0].get('assetProfile', {}).get('longBusinessSummary', None)
+            
+            if summary:
+                # 4. 進行翻譯
+                translator = GoogleTranslator(source='auto', target='zh-TW')
+                cht_summary = translator.translate(summary[:3000]) # 翻譯前3000字
+                return cht_summary
+                
+        return None
         
     except Exception as e:
-        return None, f"API/翻譯 發生錯誤: {str(e)}"
+        # 若發生任何錯誤 (JSON 解析失敗、連線失敗)，回傳 None
+        return None
 
 def show_tradingview_widget(symbol):
-    """Widget"""
+    """備案：只有在真的抓不到文字時才顯示這個"""
     html_code = f"""
     <div class="tradingview-widget-container">
       <div class="tradingview-widget-container__widget"></div>
@@ -125,42 +91,42 @@ def show_tradingview_widget(symbol):
     """
     components.html(html_code, height=310)
 
-def display_smart_profile(ticker):
-    """整合顯示 + 除錯訊息"""
+def display_clean_profile(ticker):
+    """只顯示敘述，不要列式"""
     container = st.container()
     
-    # 1. 嘗試 Yahoo TW (暴力法)
-    desc, err1 = fetch_yahoo_tw_brute_force(ticker)
-    source = "Yahoo 奇摩股市 (智慧提取)"
+    # 嘗試取得純文字
+    desc = get_pure_text_profile(ticker)
     
-    # 2. 失敗 -> 嘗試 API 翻譯
-    if not desc:
-        desc, err2 = fetch_api_translated(ticker)
-        source = "美股官方資料庫 (AI 翻譯)"
-        
     if desc:
-        # 成功
+        # 成功！使用最乾淨的排版
         container.markdown(f"""
-        <div style="background-color:#f8f9fa; padding:20px; border-radius:10px; border-left: 5px solid #28a745; margin-bottom:20px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);">
-            <h4 style="margin-top:0; color:#333;">🏢 {ticker} 發行機構簡介</h4>
-            <p style="font-size:15px; line-height:1.8; color:#444; text-align: justify; margin-bottom: 5px;">
+        <div style="
+            background-color: #f8f9fa; 
+            padding: 20px; 
+            border-radius: 8px; 
+            border-left: 5px solid #0068c9; 
+            margin-bottom: 20px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        ">
+            <h4 style="margin-top: 0; margin-bottom: 10px; color: #333;">🏢 {ticker} 發行機構簡介</h4>
+            <p style="
+                font-size: 16px; 
+                line-height: 1.8; 
+                color: #444; 
+                text-align: justify; 
+                margin: 0;
+            ">
                 {desc}
             </p>
-            <div style="text-align:right; font-size:12px; color:#666;">
-                資料來源：{source}
-            </div>
         </div>
         """, unsafe_allow_html=True)
     else:
-        # 3. 全部失敗，顯示除錯訊息並切換 Widget
-        with container.expander(f"⚠️ 簡介載入失敗，點擊查看詳細原因 (除錯用)"):
-            st.error(f"Yahoo TW 錯誤: {err1}")
-            st.error(f"API/翻譯 錯誤: {err2}")
-            st.caption("建議：如果是 API 限流，請稍後再試；如果是 IP 被擋，請使用 TradingView 模式。")
-            
+        # 萬一連 API 都失敗，只好顯示 TradingView (但這是非不得已)
+        container.warning("⚠️ 文字資料暫時無法取得，顯示標準檔案：")
         show_tradingview_widget(ticker)
 
-# --- 4. 回測核心邏輯 (KeyError 已修復) ---
+# --- 4. 回測核心 (維持不變) ---
 
 def get_stock_data_from_2009(ticker):
     try:
@@ -224,7 +190,6 @@ def run_backtest(df, ki_pct, strike_pct, months):
                                np.maximum(0, ((bt['Final_Price'] - bt['Strike_Level'])/bt['Strike_Level'])*100))
     bt['Color'] = np.where(bt['Result_Type'] == 'Loss', 'red', 'green')
     
-    # 回傳字典，鍵值與下方呼叫一致
     return bt, {
         'safety_prob': safety_prob, 
         'positive_prob': pos_prob, 
@@ -261,8 +226,8 @@ if run_btn:
     for ticker in ticker_list:
         st.markdown(f"### 📌 標的：{ticker}")
 
-        # 1. 顯示智慧簡介 (Yahoo/API)
-        display_smart_profile(ticker)
+        # 1. 顯示純淨簡介 (JSON 直連)
+        display_clean_profile(ticker)
         
         # 2. 執行回測
         with st.spinner(f"正在計算 {ticker} 數據..."):
