@@ -4,12 +4,14 @@ import pandas as pd
 import yfinance as yf
 import numpy as np
 import streamlit.components.v1 as components
-from deep_translator import GoogleTranslator
+import requests
+from bs4 import BeautifulSoup
+import urllib.parse
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="結構型商品戰情室 (V31.0)", layout="wide")
+st.set_page_config(page_title="結構型商品戰情室 (V32.0)", layout="wide")
 st.title("📊 結構型商品 - 關鍵點位與長週期風險回測")
-st.markdown("回測區間：**2009/01/01 至今**。資料源：**官方 API 直連 + AI 自動翻譯** (保證不被擋)。")
+st.markdown("回測區間：**2009/01/01 至今**。資料源：**MoneyDJ (透過 Proxy 跳板抓取)**。")
 st.divider()
 
 # --- 2. 側邊欄 ---
@@ -29,32 +31,64 @@ period_months = st.sidebar.number_input("觀察天期 (月)", min_value=1, max_v
 
 run_btn = st.sidebar.button("🚀 開始分析", type="primary")
 
-# --- 3. 核心函數：API 抓取 + 翻譯 ---
+# --- 3. 核心函數：跳板爬蟲 ---
 
-def get_translated_profile(ticker):
+def fetch_moneydj_via_proxy(ticker):
     """
-    從 yfinance 取得官方英文簡介，並翻譯成繁體中文
+    使用 allorigins.win 作為跳板，繞過 Streamlit Cloud 的 IP 封鎖，
+    抓取 MoneyDJ 的「經營概述」。
     """
     try:
-        tk = yf.Ticker(ticker)
-        # 嘗試取得英文簡介
-        english_summary = tk.info.get('longBusinessSummary', None)
+        # MoneyDJ 目標網址 (基本資料頁)
+        target_url = f"https://www.moneydj.com/us/basic/basic0001.xdjhtm?a={ticker}"
         
-        if not english_summary:
-            return None, None
+        # 將網址編碼，準備通過 Proxy
+        encoded_url = urllib.parse.quote(target_url)
+        
+        # 使用 Proxy API
+        proxy_url = f"https://api.allorigins.win/get?url={encoded_url}"
+        
+        # 發送請求給 Proxy
+        response = requests.get(proxy_url, timeout=10)
+        
+        if response.status_code == 200:
+            # Proxy 回傳的是 JSON，內容在 'contents' 欄位中
+            data = response.json()
+            html_content = data.get('contents', '')
             
-        # 進行翻譯 (English -> Traditional Chinese)
-        translator = GoogleTranslator(source='auto', target='zh-TW')
-        # 限制長度以免翻譯失敗 (通常前 500 字就夠了)
-        chinese_summary = translator.translate(english_summary[:4500]) 
-        
-        return chinese_summary, "Yahoo Finance API (AI 翻譯)"
+            if not html_content:
+                return None, "Proxy 回傳空內容"
+
+            # 解析 HTML
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # --- MoneyDJ 抓取邏輯 ---
+            # 尋找含有 "經營概述" 的表格列
+            rows = soup.find_all('tr')
+            for row in rows:
+                if "經營概述" in row.get_text():
+                    # 找到該列後，抓取內容 (通常是該列的第二個欄位)
+                    cells = row.find_all(['td', 'th'])
+                    for cell in cells:
+                        text = cell.get_text().strip()
+                        # 內容長度大於 20 且不是標題本身
+                        if len(text) > 20 and "經營概述" not in text:
+                            return text, None
+            
+            # 備用：抓 article
+            article = soup.find('article')
+            if article:
+                return article.get_text().strip(), None
+                
+            return None, "找不到經營概述欄位"
+            
+        return None, f"Proxy 請求失敗: {response.status_code}"
         
     except Exception as e:
         return None, str(e)
 
 def show_tradingview_widget(symbol):
-    """備案：Widget"""
+    """最後防線：Widget"""
     html_code = f"""
     <div class="tradingview-widget-container">
       <div class="tradingview-widget-container__widget"></div>
@@ -76,25 +110,26 @@ def display_smart_profile(ticker):
     """整合顯示"""
     container = st.container()
     
-    # 1. 使用 API + 翻譯 (最穩定)
-    desc, source = get_translated_profile(ticker)
+    # 使用 Proxy 抓取 MoneyDJ
+    desc, error_msg = fetch_moneydj_via_proxy(ticker)
     
     if desc:
-        # 成功抓到並翻譯
+        # 成功抓到！
         container.markdown(f"""
-        <div style="background-color:#f0f7ff; padding:20px; border-radius:10px; border-left: 5px solid #0068c9; margin-bottom:20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-            <h4 style="margin-top:0; color:#202124;">🏢 {ticker} 經營概述 (中文版)</h4>
+        <div style="background-color:#f8f9fa; padding:20px; border-radius:10px; border-left: 5px solid #d93025; margin-bottom:20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <h4 style="margin-top:0; color:#202124;">🏢 {ticker} 經營概述 (MoneyDJ)</h4>
             <p style="font-size:15px; line-height:1.8; color:#3c4043; text-align: justify; margin-bottom: 10px;">
-                {desc} ... (以下省略)
+                {desc}
             </p>
-            <div style="text-align:right; font-size:12px; color:#5f6368;">
-                資料來源：{source}
+            <div style="text-align:right; font-size:12px; color:#888;">
+                資料來源：MoneyDJ 理財網 (Via Proxy)
             </div>
         </div>
         """, unsafe_allow_html=True)
     else:
-        # 2. 萬一 API 也沒資料，才顯示 Widget
-        container.warning("⚠️ 無法取得文字簡介，切換至 TradingView 模式")
+        # 失敗，顯示錯誤原因 (方便除錯) 並切換 Widget
+        # container.caption(f"除錯訊息: {error_msg}") 
+        container.warning("⚠️ 外部連線受阻，切換至 TradingView 模式")
         show_tradingview_widget(ticker)
 
 # --- 4. 回測核心邏輯 (維持不變) ---
@@ -140,7 +175,6 @@ def run_backtest(df, ki_pct, strike_pct, months):
     ]
     bt['Result_Type'] = np.select(conditions, ['Loss', 'Safe', 'Safe'], default='Unknown')
     
-    # 統計
     total = len(bt)
     safe_count = len(bt[bt['Result_Type'] == 'Safe'])
     safety_prob = (safe_count / total) * 100
@@ -157,7 +191,6 @@ def run_backtest(df, ki_pct, strike_pct, months):
             
     avg_rec = np.mean(recov_days) if recov_days else 0
     
-    # Bar Chart Data
     bt['Bar_Value'] = np.where(bt['Result_Type'] == 'Loss', 
                                ((bt['Final_Price'] - bt['Strike_Level'])/bt['Strike_Level'])*100, 
                                np.maximum(0, ((bt['Final_Price'] - bt['Strike_Level'])/bt['Strike_Level'])*100))
@@ -171,7 +204,7 @@ if run_btn:
     ticker_list = [t.strip().upper() for t in tickers_input.split(',') if t.strip()]
     
     for ticker in ticker_list:
-        # 1. 顯示簡介 (API + 翻譯)
+        # 1. 顯示智慧簡介 (MoneyDJ via Proxy)
         display_smart_profile(ticker)
         
         # 2. 執行回測
@@ -238,6 +271,6 @@ st.markdown("""
 }
 </style>
 <div class='disclaimer-box'>
-    <strong>⚠️ 免責聲明</strong>：本工具僅供教學與模擬試算，不代表投資建議。股價與簡介資料來源為 Yahoo Finance。
+    <strong>⚠️ 免責聲明</strong>：本工具僅供教學與模擬試算，不代表投資建議。
 </div>
 """, unsafe_allow_html=True)
