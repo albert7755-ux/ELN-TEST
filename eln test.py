@@ -4,14 +4,12 @@ import pandas as pd
 import yfinance as yf
 import numpy as np
 import streamlit.components.v1 as components
-import requests
-from bs4 import BeautifulSoup
-import random
+from deep_translator import GoogleTranslator
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="結構型商品戰情室 (V30.0)", layout="wide")
+st.set_page_config(page_title="結構型商品戰情室 (V31.0)", layout="wide")
 st.title("📊 結構型商品 - 關鍵點位與長週期風險回測")
-st.markdown("回測區間：**2009/01/01 至今**。資料源：**MoneyDJ (經營概述)**。")
+st.markdown("回測區間：**2009/01/01 至今**。資料源：**官方 API 直連 + AI 自動翻譯** (保證不被擋)。")
 st.divider()
 
 # --- 2. 側邊欄 ---
@@ -31,82 +29,32 @@ period_months = st.sidebar.number_input("觀察天期 (月)", min_value=1, max_v
 
 run_btn = st.sidebar.button("🚀 開始分析", type="primary")
 
-# --- 3. 核心函數：精準爬蟲 (MoneyDJ 經營概述) ---
+# --- 3. 核心函數：API 抓取 + 翻譯 ---
 
-def get_headers():
-    """偽裝成真實瀏覽器"""
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
-    ]
-    return {
-        "User-Agent": random.choice(user_agents),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Referer": "https://www.moneydj.com/"
-    }
-
-def fetch_moneydj_overview(ticker):
+def get_translated_profile(ticker):
     """
-    目標：MoneyDJ 美股 -> 基本資料 (basic0001.xdjhtm) -> 找「經營概述」
+    從 yfinance 取得官方英文簡介，並翻譯成繁體中文
     """
     try:
-        # 正確的基本資料頁面路徑
-        url = f"https://www.moneydj.com/us/basic/basic0001.xdjhtm?a={ticker}"
+        tk = yf.Ticker(ticker)
+        # 嘗試取得英文簡介
+        english_summary = tk.info.get('longBusinessSummary', None)
         
-        response = requests.get(url, headers=get_headers(), timeout=6)
-        response.encoding = 'utf-8' # 強制編碼
-
-        if response.status_code == 200:
-            # 檢查是否被轉址到錯誤頁面 (標題是否包含代碼)
-            if ticker not in response.text and ticker.lower() not in response.text:
-                return None
-
-            soup = BeautifulSoup(response.text, 'html.parser')
+        if not english_summary:
+            return None, None
             
-            # MoneyDJ 的資料通常在表格 (table) 裡
-            # 我們搜尋所有的 table row (tr)
-            rows = soup.find_all('tr')
-            
-            for row in rows:
-                # 找表頭 (th) 或第一格 (td) 是 "經營概述" 的那一列
-                text_content = row.get_text()
-                if "經營概述" in text_content:
-                    # 找到該列後，抓取該列的第二個欄位 (td)
-                    # 通常結構是: <th>經營概述</th> <td>內容...</td>
-                    cells = row.find_all(['td', 'th'])
-                    # 我們要把含有長文字的那一格抓出來
-                    for cell in cells:
-                        cell_text = cell.get_text().strip()
-                        # 排除掉標題本身，且長度足夠長
-                        if "經營概述" not in cell_text and len(cell_text) > 20:
-                            return cell_text
-                            
-            # 備用方案：如果表格結構改變，嘗試抓取 article
-            article = soup.find('article')
-            if article:
-                return article.get_text().strip()
-
-        return None
-    except Exception:
-        return None
-
-def fetch_yahoo_fallback(ticker):
-    """備援：Yahoo 奇摩股市 (內容通常與 MoneyDJ 雷同)"""
-    try:
-        url = f"https://tw.stock.yahoo.com/quote/{ticker}/profile"
-        response = requests.get(url, headers=get_headers(), timeout=5)
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            # 找字數最多的段落
-            paragraphs = soup.find_all('p')
-            candidates = [p.get_text().strip() for p in paragraphs if len(p.get_text().strip()) > 50]
-            if candidates: return max(candidates, key=len)
-        return None
-    except Exception:
-        return None
+        # 進行翻譯 (English -> Traditional Chinese)
+        translator = GoogleTranslator(source='auto', target='zh-TW')
+        # 限制長度以免翻譯失敗 (通常前 500 字就夠了)
+        chinese_summary = translator.translate(english_summary[:4500]) 
+        
+        return chinese_summary, "Yahoo Finance API (AI 翻譯)"
+        
+    except Exception as e:
+        return None, str(e)
 
 def show_tradingview_widget(symbol):
-    """最後防線：Widget"""
+    """備案：Widget"""
     html_code = f"""
     <div class="tradingview-widget-container">
       <div class="tradingview-widget-container__widget"></div>
@@ -128,23 +76,16 @@ def display_smart_profile(ticker):
     """整合顯示"""
     container = st.container()
     
-    # 1. 優先嘗試 MoneyDJ (經營概述)
-    desc = fetch_moneydj_overview(ticker)
-    source = "MoneyDJ 理財網"
+    # 1. 使用 API + 翻譯 (最穩定)
+    desc, source = get_translated_profile(ticker)
     
-    # 2. 失敗則用 Yahoo
-    if not desc:
-        desc = fetch_yahoo_fallback(ticker)
-        source = "Yahoo 奇摩股市 (備援)"
-    
-    # 3. 顯示結果
-    if desc and len(desc) > 30:
-        # 成功抓到文字
+    if desc:
+        # 成功抓到並翻譯
         container.markdown(f"""
-        <div style="background-color:#f8f9fa; padding:20px; border-radius:10px; border-left: 5px solid #d93025; margin-bottom:20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-            <h4 style="margin-top:0; color:#202124; font-family:'Microsoft JhengHei';">🏢 {ticker} 經營概述</h4>
+        <div style="background-color:#f0f7ff; padding:20px; border-radius:10px; border-left: 5px solid #0068c9; margin-bottom:20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <h4 style="margin-top:0; color:#202124;">🏢 {ticker} 經營概述 (中文版)</h4>
             <p style="font-size:15px; line-height:1.8; color:#3c4043; text-align: justify; margin-bottom: 10px;">
-                {desc}
+                {desc} ... (以下省略)
             </p>
             <div style="text-align:right; font-size:12px; color:#5f6368;">
                 資料來源：{source}
@@ -152,7 +93,7 @@ def display_smart_profile(ticker):
         </div>
         """, unsafe_allow_html=True)
     else:
-        # 都失敗則顯示 Widget
+        # 2. 萬一 API 也沒資料，才顯示 Widget
         container.warning("⚠️ 無法取得文字簡介，切換至 TradingView 模式")
         show_tradingview_widget(ticker)
 
@@ -230,7 +171,7 @@ if run_btn:
     ticker_list = [t.strip().upper() for t in tickers_input.split(',') if t.strip()]
     
     for ticker in ticker_list:
-        # 1. 顯示智慧簡介 (MoneyDJ -> Yahoo)
+        # 1. 顯示簡介 (API + 翻譯)
         display_smart_profile(ticker)
         
         # 2. 執行回測
@@ -297,6 +238,6 @@ st.markdown("""
 }
 </style>
 <div class='disclaimer-box'>
-    <strong>⚠️ 免責聲明</strong>：本工具僅供教學與模擬試算，不代表投資建議。股價資料來源為 Yahoo Finance，發行機構簡介來源為 MoneyDJ/Yahoo 股市。
+    <strong>⚠️ 免責聲明</strong>：本工具僅供教學與模擬試算，不代表投資建議。股價與簡介資料來源為 Yahoo Finance。
 </div>
 """, unsafe_allow_html=True)
