@@ -4,15 +4,12 @@ import pandas as pd
 import yfinance as yf
 import numpy as np
 import streamlit.components.v1 as components
-import requests
-from bs4 import BeautifulSoup
-import random
 from deep_translator import GoogleTranslator
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="結構型商品戰情室 (V33.0)", layout="wide")
+st.set_page_config(page_title="結構型商品戰情室 (V34.0)", layout="wide")
 st.title("📊 結構型商品 - 關鍵點位與長週期風險回測")
-st.markdown("資料源順序：**Yahoo 奇摩 -> 富途牛牛 -> AI 自動翻譯 (保底機制)**")
+st.markdown("回測區間：**2009/01/01 至今**。資料源：**官方資料庫直連 (無廣告)**。")
 st.divider()
 
 # --- 2. 側邊欄 ---
@@ -32,126 +29,76 @@ period_months = st.sidebar.number_input("觀察天期 (月)", min_value=1, max_v
 
 run_btn = st.sidebar.button("🚀 開始分析", type="primary")
 
-# --- 3. 核心函數：多重來源爬蟲 ---
+# --- 3. 核心函數：API 取資料 + AI 翻譯 ---
 
-def get_headers():
-    """偽裝 Header"""
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
-    ]
-    return {"User-Agent": random.choice(user_agents)}
-
-def fetch_yahoo_tw_robust(ticker):
+def get_clean_profile(ticker):
     """
-    來源 1: Yahoo 奇摩股市 (最穩定)
-    策略：不找特定 class，直接找頁面上「最長的一段純文字」，通常就是簡介。
+    透過 API 取得官方簡介並翻譯，完全避開網頁廣告。
     """
     try:
-        url = f"https://tw.stock.yahoo.com/quote/{ticker}/profile"
-        response = requests.get(url, headers=get_headers(), timeout=5)
-        
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            # 抓取所有 p 和 div 標籤
-            tags = soup.find_all(['p', 'div'])
-            
-            candidates = []
-            for tag in tags:
-                text = tag.get_text().strip()
-                # 簡介通常大於 50 字，且不含某些雜訊
-                if len(text) > 50 and len(text) < 3000:
-                    candidates.append(text)
-            
-            if candidates:
-                # 回傳最長的那一段
-                return max(candidates, key=len)
-        return None
-    except:
-        return None
-
-def fetch_futu_profile(ticker):
-    """
-    來源 2: 富途牛牛 (Futu)
-    網址結構: https://www.futunn.com/hk/stock/{ticker}-US/company-profile
-    """
-    try:
-        url = f"https://www.futunn.com/hk/stock/{ticker}-US/company-profile"
-        response = requests.get(url, headers=get_headers(), timeout=6)
-        
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            # 富途的簡介通常在特定的 div class 中，但也可能變動
-            # 這裡同樣使用「尋找長文字」的通用策略
-            divs = soup.find_all('div')
-            candidates = []
-            for div in divs:
-                text = div.get_text().strip()
-                if 100 < len(text) < 3000 and "簡介" not in text[:10]: # 避開標題
-                    candidates.append(text)
-            
-            if candidates:
-                return max(candidates, key=len)
-        return None
-    except:
-        return None
-
-def fetch_translated_fallback(ticker):
-    """
-    來源 3: 終極保底 (yfinance API + Google Translate)
-    優點：絕對不會被擋 IP，保證有字。
-    """
-    try:
+        # 1. 連線官方資料庫
         tk = yf.Ticker(ticker)
-        eng_summary = tk.info.get('longBusinessSummary', "")
+        
+        # 2. 取得 "longBusinessSummary" (這是純文字，沒有任何廣告 HTML)
+        eng_summary = tk.info.get('longBusinessSummary', None)
         
         if not eng_summary:
-            return None
+            return None, "官方資料庫無簡介"
             
-        # 進行翻譯
+        # 3. 呼叫 Google 翻譯 (英 -> 繁中)
         translator = GoogleTranslator(source='auto', target='zh-TW')
-        # 限制長度避免翻譯逾時
+        
+        # 為了翻譯速度與準確度，我們取前 3000 個字元 (通常足夠涵蓋重點)
         cht_summary = translator.translate(eng_summary[:3000])
-        return cht_summary
-    except:
-        return None
+        
+        return cht_summary, "美股官方資料庫 (AI 翻譯)"
+        
+    except Exception as e:
+        return None, str(e)
 
-def display_issuer_profile(ticker):
+def show_tradingview_widget(symbol):
+    """備案：如果連 API 都失敗才顯示這個"""
+    html_code = f"""
+    <div class="tradingview-widget-container">
+      <div class="tradingview-widget-container__widget"></div>
+      <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-symbol-profile.js" async>
+      {{
+      "width": "100%",
+      "height": "300",
+      "colorTheme": "light",
+      "isTransparent": false,
+      "symbol": "{symbol}",
+      "locale": "zh_TW"
+      }}
+      </script>
+    </div>
     """
-    整合顯示邏輯
-    """
+    components.html(html_code, height=310)
+
+def display_smart_profile(ticker):
+    """顯示邏輯"""
     container = st.container()
     
-    # 1. 嘗試 Yahoo TW (內容最接近 MoneyDJ/財報狗)
-    desc = fetch_yahoo_tw_robust(ticker)
-    source = "Yahoo 奇摩股市"
+    # 呼叫純淨函數
+    desc, source = get_clean_profile(ticker)
     
-    # 2. 失敗 -> 嘗試 富途牛牛
-    if not desc:
-        desc = fetch_futu_profile(ticker)
-        source = "富途牛牛 (Futu)"
-        
-    # 3. 再失敗 -> 啟動 AI 翻譯 (終極救援)
-    if not desc:
-        desc = fetch_translated_fallback(ticker)
-        source = "AI 自動翻譯 (來源: 美股官方資料)"
-    
-    # 顯示結果
     if desc:
+        # 成功！
         container.markdown(f"""
-        <div style="background-color:#f8f9fa; padding:20px; border-radius:10px; border-left: 5px solid #28a745; margin-bottom:20px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);">
-            <h4 style="margin-top:0; color:#333;">🏢 {ticker} 發行機構簡介</h4>
-            <p style="font-size:15px; line-height:1.8; color:#444; text-align: justify; margin-bottom: 5px;">
+        <div style="background-color:#f8f9fa; padding:20px; border-radius:10px; border-left: 5px solid #0068c9; margin-bottom:20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <h4 style="margin-top:0; color:#202124;">🏢 {ticker} 發行機構簡介</h4>
+            <p style="font-size:15px; line-height:1.8; color:#3c4043; text-align: justify; margin-bottom: 5px;">
                 {desc}
             </p>
             <div style="text-align:right; font-size:12px; color:#666;">
-                資料來源：{source}
+                資料來源：{source} (無廣告純淨版)
             </div>
         </div>
         """, unsafe_allow_html=True)
     else:
-        # 真的完全沒資料 (非常罕見)
-        container.warning(f"⚠️ 暫無 {ticker} 的簡介資料")
+        # 萬一失敗
+        container.warning("⚠️ 簡介載入異常，切換至 TradingView 模式")
+        show_tradingview_widget(ticker)
 
 # --- 4. 回測核心邏輯 (維持不變) ---
 
@@ -247,8 +194,8 @@ if run_btn:
     for ticker in ticker_list:
         st.markdown(f"### 📌 標的：{ticker}")
 
-        # 1. 顯示智慧簡介 (Yahoo/Futu/AI)
-        display_issuer_profile(ticker)
+        # 1. 顯示純淨版簡介 (API + 翻譯)
+        display_smart_profile(ticker)
         
         # 2. 執行回測
         with st.spinner(f"正在計算 {ticker} 數據..."):
@@ -312,6 +259,6 @@ st.markdown("""
 }
 </style>
 <div class='disclaimer-box'>
-    <strong>⚠️ 免責聲明</strong>：本工具僅供教學與模擬試算，不代表投資建議。簡介資料來源為 Yahoo/Futu/AI翻譯，內容僅供參考。
+    <strong>⚠️ 免責聲明</strong>：本工具僅供教學與模擬試算，不代表投資建議。簡介資料來源為 Yahoo Finance (API) 翻譯。
 </div>
 """, unsafe_allow_html=True)
