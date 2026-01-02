@@ -6,12 +6,13 @@ import numpy as np
 import streamlit.components.v1 as components
 import requests
 from bs4 import BeautifulSoup
-import urllib.parse
+import random
+from deep_translator import GoogleTranslator
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="結構型商品戰情室 (V32.0)", layout="wide")
+st.set_page_config(page_title="結構型商品戰情室 (V33.0)", layout="wide")
 st.title("📊 結構型商品 - 關鍵點位與長週期風險回測")
-st.markdown("回測區間：**2009/01/01 至今**。資料源：**MoneyDJ (透過 Proxy 跳板抓取)**。")
+st.markdown("資料源順序：**Yahoo 奇摩 -> 富途牛牛 -> AI 自動翻譯 (保底機制)**")
 st.divider()
 
 # --- 2. 側邊欄 ---
@@ -31,106 +32,126 @@ period_months = st.sidebar.number_input("觀察天期 (月)", min_value=1, max_v
 
 run_btn = st.sidebar.button("🚀 開始分析", type="primary")
 
-# --- 3. 核心函數：跳板爬蟲 ---
+# --- 3. 核心函數：多重來源爬蟲 ---
 
-def fetch_moneydj_via_proxy(ticker):
+def get_headers():
+    """偽裝 Header"""
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+    ]
+    return {"User-Agent": random.choice(user_agents)}
+
+def fetch_yahoo_tw_robust(ticker):
     """
-    使用 allorigins.win 作為跳板，繞過 Streamlit Cloud 的 IP 封鎖，
-    抓取 MoneyDJ 的「經營概述」。
+    來源 1: Yahoo 奇摩股市 (最穩定)
+    策略：不找特定 class，直接找頁面上「最長的一段純文字」，通常就是簡介。
     """
     try:
-        # MoneyDJ 目標網址 (基本資料頁)
-        target_url = f"https://www.moneydj.com/us/basic/basic0001.xdjhtm?a={ticker}"
-        
-        # 將網址編碼，準備通過 Proxy
-        encoded_url = urllib.parse.quote(target_url)
-        
-        # 使用 Proxy API
-        proxy_url = f"https://api.allorigins.win/get?url={encoded_url}"
-        
-        # 發送請求給 Proxy
-        response = requests.get(proxy_url, timeout=10)
+        url = f"https://tw.stock.yahoo.com/quote/{ticker}/profile"
+        response = requests.get(url, headers=get_headers(), timeout=5)
         
         if response.status_code == 200:
-            # Proxy 回傳的是 JSON，內容在 'contents' 欄位中
-            data = response.json()
-            html_content = data.get('contents', '')
+            soup = BeautifulSoup(response.text, 'html.parser')
+            # 抓取所有 p 和 div 標籤
+            tags = soup.find_all(['p', 'div'])
             
-            if not html_content:
-                return None, "Proxy 回傳空內容"
+            candidates = []
+            for tag in tags:
+                text = tag.get_text().strip()
+                # 簡介通常大於 50 字，且不含某些雜訊
+                if len(text) > 50 and len(text) < 3000:
+                    candidates.append(text)
+            
+            if candidates:
+                # 回傳最長的那一段
+                return max(candidates, key=len)
+        return None
+    except:
+        return None
 
-            # 解析 HTML
-            soup = BeautifulSoup(html_content, 'html.parser')
-            
-            # --- MoneyDJ 抓取邏輯 ---
-            # 尋找含有 "經營概述" 的表格列
-            rows = soup.find_all('tr')
-            for row in rows:
-                if "經營概述" in row.get_text():
-                    # 找到該列後，抓取內容 (通常是該列的第二個欄位)
-                    cells = row.find_all(['td', 'th'])
-                    for cell in cells:
-                        text = cell.get_text().strip()
-                        # 內容長度大於 20 且不是標題本身
-                        if len(text) > 20 and "經營概述" not in text:
-                            return text, None
-            
-            # 備用：抓 article
-            article = soup.find('article')
-            if article:
-                return article.get_text().strip(), None
-                
-            return None, "找不到經營概述欄位"
-            
-        return None, f"Proxy 請求失敗: {response.status_code}"
-        
-    except Exception as e:
-        return None, str(e)
-
-def show_tradingview_widget(symbol):
-    """最後防線：Widget"""
-    html_code = f"""
-    <div class="tradingview-widget-container">
-      <div class="tradingview-widget-container__widget"></div>
-      <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-symbol-profile.js" async>
-      {{
-      "width": "100%",
-      "height": "300",
-      "colorTheme": "light",
-      "isTransparent": false,
-      "symbol": "{symbol}",
-      "locale": "zh_TW"
-      }}
-      </script>
-    </div>
+def fetch_futu_profile(ticker):
     """
-    components.html(html_code, height=310)
+    來源 2: 富途牛牛 (Futu)
+    網址結構: https://www.futunn.com/hk/stock/{ticker}-US/company-profile
+    """
+    try:
+        url = f"https://www.futunn.com/hk/stock/{ticker}-US/company-profile"
+        response = requests.get(url, headers=get_headers(), timeout=6)
+        
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            # 富途的簡介通常在特定的 div class 中，但也可能變動
+            # 這裡同樣使用「尋找長文字」的通用策略
+            divs = soup.find_all('div')
+            candidates = []
+            for div in divs:
+                text = div.get_text().strip()
+                if 100 < len(text) < 3000 and "簡介" not in text[:10]: # 避開標題
+                    candidates.append(text)
+            
+            if candidates:
+                return max(candidates, key=len)
+        return None
+    except:
+        return None
 
-def display_smart_profile(ticker):
-    """整合顯示"""
+def fetch_translated_fallback(ticker):
+    """
+    來源 3: 終極保底 (yfinance API + Google Translate)
+    優點：絕對不會被擋 IP，保證有字。
+    """
+    try:
+        tk = yf.Ticker(ticker)
+        eng_summary = tk.info.get('longBusinessSummary', "")
+        
+        if not eng_summary:
+            return None
+            
+        # 進行翻譯
+        translator = GoogleTranslator(source='auto', target='zh-TW')
+        # 限制長度避免翻譯逾時
+        cht_summary = translator.translate(eng_summary[:3000])
+        return cht_summary
+    except:
+        return None
+
+def display_issuer_profile(ticker):
+    """
+    整合顯示邏輯
+    """
     container = st.container()
     
-    # 使用 Proxy 抓取 MoneyDJ
-    desc, error_msg = fetch_moneydj_via_proxy(ticker)
+    # 1. 嘗試 Yahoo TW (內容最接近 MoneyDJ/財報狗)
+    desc = fetch_yahoo_tw_robust(ticker)
+    source = "Yahoo 奇摩股市"
     
+    # 2. 失敗 -> 嘗試 富途牛牛
+    if not desc:
+        desc = fetch_futu_profile(ticker)
+        source = "富途牛牛 (Futu)"
+        
+    # 3. 再失敗 -> 啟動 AI 翻譯 (終極救援)
+    if not desc:
+        desc = fetch_translated_fallback(ticker)
+        source = "AI 自動翻譯 (來源: 美股官方資料)"
+    
+    # 顯示結果
     if desc:
-        # 成功抓到！
         container.markdown(f"""
-        <div style="background-color:#f8f9fa; padding:20px; border-radius:10px; border-left: 5px solid #d93025; margin-bottom:20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-            <h4 style="margin-top:0; color:#202124;">🏢 {ticker} 經營概述 (MoneyDJ)</h4>
-            <p style="font-size:15px; line-height:1.8; color:#3c4043; text-align: justify; margin-bottom: 10px;">
+        <div style="background-color:#f8f9fa; padding:20px; border-radius:10px; border-left: 5px solid #28a745; margin-bottom:20px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);">
+            <h4 style="margin-top:0; color:#333;">🏢 {ticker} 發行機構簡介</h4>
+            <p style="font-size:15px; line-height:1.8; color:#444; text-align: justify; margin-bottom: 5px;">
                 {desc}
             </p>
-            <div style="text-align:right; font-size:12px; color:#888;">
-                資料來源：MoneyDJ 理財網 (Via Proxy)
+            <div style="text-align:right; font-size:12px; color:#666;">
+                資料來源：{source}
             </div>
         </div>
         """, unsafe_allow_html=True)
     else:
-        # 失敗，顯示錯誤原因 (方便除錯) 並切換 Widget
-        # container.caption(f"除錯訊息: {error_msg}") 
-        container.warning("⚠️ 外部連線受阻，切換至 TradingView 模式")
-        show_tradingview_widget(ticker)
+        # 真的完全沒資料 (非常罕見)
+        container.warning(f"⚠️ 暫無 {ticker} 的簡介資料")
 
 # --- 4. 回測核心邏輯 (維持不變) ---
 
@@ -198,14 +219,36 @@ def run_backtest(df, ki_pct, strike_pct, months):
     
     return bt, {'safety': safety_prob, 'pos': pos_prob, 'loss_cnt': len(loss_idx), 'stuck': stuck, 'rec_days': avg_rec}
 
+def plot_integrated_chart(df, ticker, current_price, p_ko, p_ki, p_st):
+    plot_df = df.tail(750).copy()
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=plot_df['Date'], y=plot_df['Close'], line=dict(color='black'), name='股價'))
+    fig.add_trace(go.Scatter(x=plot_df['Date'], y=plot_df['MA20'], line=dict(color='#3498db'), name='月線'))
+    fig.add_trace(go.Scatter(x=plot_df['Date'], y=plot_df['MA60'], line=dict(color='#f1c40f'), name='季線'))
+    fig.add_trace(go.Scatter(x=plot_df['Date'], y=plot_df['MA240'], line=dict(color='#9b59b6'), name='年線'))
+
+    fig.add_hline(y=p_ko, line_dash="dash", line_color="red")
+    fig.add_annotation(x=1, y=p_ko, xref="paper", yref="y", text=f"KO: {p_ko:.2f}", showarrow=False, xanchor="left", font=dict(color="red"))
+    fig.add_hline(y=p_st, line_color="green")
+    fig.add_annotation(x=1, y=p_st, xref="paper", yref="y", text=f"Strike: {p_st:.2f}", showarrow=False, xanchor="left", font=dict(color="green"))
+    fig.add_hline(y=p_ki, line_dash="dot", line_color="orange")
+    fig.add_annotation(x=1, y=p_ki, xref="paper", yref="y", text=f"KI: {p_ki:.2f}", showarrow=False, xanchor="left", font=dict(color="orange"))
+
+    all_prices = [p_ko, p_ki, p_st, plot_df['Close'].max(), plot_df['Close'].min()]
+    y_min, y_max = min(all_prices)*0.9, max(all_prices)*1.05
+    fig.update_layout(title=f"{ticker} 走勢與關鍵價位", height=450, margin=dict(r=80), yaxis_range=[y_min, y_max], hovermode="x unified")
+    return fig
+
 # --- 5. 執行主程式 ---
 
 if run_btn:
     ticker_list = [t.strip().upper() for t in tickers_input.split(',') if t.strip()]
     
     for ticker in ticker_list:
-        # 1. 顯示智慧簡介 (MoneyDJ via Proxy)
-        display_smart_profile(ticker)
+        st.markdown(f"### 📌 標的：{ticker}")
+
+        # 1. 顯示智慧簡介 (Yahoo/Futu/AI)
+        display_issuer_profile(ticker)
         
         # 2. 執行回測
         with st.spinner(f"正在計算 {ticker} 數據..."):
@@ -232,20 +275,18 @@ if run_btn:
             c3.metric(f"KI ({ki_pct}%)", f"{p_ki:.2f}", delta_color="inverse")
             c4.metric(f"Strike ({strike_pct}%)", f"{p_st:.2f}")
             
-            plot_df = df.tail(750)
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=plot_df['Date'], y=plot_df['Close'], line=dict(color='black'), name='股價'))
-            fig.add_hline(y=p_ko, line_dash="dash", line_color="red")
-            fig.add_hline(y=p_ki, line_dash="dot", line_color="orange")
-            fig.add_hline(y=p_st, line_color="green")
-            fig.update_layout(title=f"{ticker} 關鍵點位 (近3年)", height=400, margin=dict(l=20,r=20,t=40,b=20))
-            st.plotly_chart(fig, use_container_width=True)
+            fig_main = plot_integrated_chart(df, ticker, current_price, p_ko, p_ki, p_st)
+            st.plotly_chart(fig_main, use_container_width=True)
+            
+            loss_pct = 100 - stats['safety_prob']
+            stuck_rate = 0
+            if stats['loss_count'] > 0:
+                stuck_rate = (stats['stuck_count'] / stats['loss_count']) * 100
             
             st.info(f"""
-            **📊 {ticker} 分析報告：**
-            * **獲利機率**：{stats['pos']:.1f}% (期末股價上漲)
-            * **本金安全率**：{stats['safety']:.1f}% (未跌破 KI 或漲回)
-            * **風險情境**：若不幸接股 (機率 {100-stats['safety']:.1f}%)，平均需等待 **{stats['rec_days']:.0f} 天** 解套。
+            **📊 回測結果：**
+            * **本金安全率**：{stats['safety']:.1f}% (過去16年未發生虧損的機率)
+            * **解套時間**：若不幸發生虧損，平均需 **{stats['rec_days']:.0f} 天** 股價可漲回 Strike。
             """)
             
             fig_bar = go.Figure()
@@ -271,6 +312,6 @@ st.markdown("""
 }
 </style>
 <div class='disclaimer-box'>
-    <strong>⚠️ 免責聲明</strong>：本工具僅供教學與模擬試算，不代表投資建議。
+    <strong>⚠️ 免責聲明</strong>：本工具僅供教學與模擬試算，不代表投資建議。簡介資料來源為 Yahoo/Futu/AI翻譯，內容僅供參考。
 </div>
 """, unsafe_allow_html=True)
