@@ -6,12 +6,13 @@ import numpy as np
 import streamlit.components.v1 as components
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime, timedelta
+import time
+import random
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="結構型商品戰情室 (V27.0)", layout="wide")
+st.set_page_config(page_title="結構型商品戰情室 (V28.0)", layout="wide")
 st.title("📊 結構型商品 - 關鍵點位與長週期風險回測")
-st.markdown("回測區間：**2009/01/01 至今**。報告順序優化：**獲利潛力 -> 安全性 -> 解套時間**。")
+st.markdown("回測區間：**2009/01/01 至今**。資料源優先序：**MoneyDJ -> Yahoo -> TradingView**。")
 st.divider()
 
 # --- 2. 側邊欄：參數設定 ---
@@ -33,47 +34,86 @@ period_months = st.sidebar.number_input("產品/觀察天期 (月)", min_value=1
 
 run_btn = st.sidebar.button("🚀 開始分析", type="primary")
 
-# --- 3. 核心函數 ---
+# --- 3. 核心函數：雙引擎爬蟲 ---
 
-def get_chinese_description(ticker):
+def get_headers():
+    """隨機產生 User-Agent 以降低被擋機率"""
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0"
+    ]
+    return {"User-Agent": random.choice(user_agents)}
+
+def fetch_moneydj(ticker):
     """
-    嘗試爬取中文簡介 (優先使用 Yahoo 奇摩股市，因為 MoneyDJ 雲端易擋且結構複雜)
-    只回傳「純文字簡介」，不包含產業、員工等資訊。
+    爬蟲引擎 1: MoneyDJ
     """
     try:
-        # Yahoo 奇摩股市美股個股檔案 URL
-        url = f"https://tw.stock.yahoo.com/quote/{ticker}/profile"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
-        
-        response = requests.get(url, headers=headers, timeout=3)
-        
+        # MoneyDJ 美股個股基本資料 URL
+        url = f"https://www.moneydj.com/us/basic/uslookup.svc/rgbasic?stk={ticker}"
+        response = requests.get(url, headers=get_headers(), timeout=5)
+        response.encoding = 'utf-8' # MoneyDJ 有時編碼不同，強制 UTF-8 試試
+
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            # 尋找簡介區塊 (Yahoo TW 的結構通常在一個特定的 section 或是 p 標籤)
-            # 這裡針對 Yahoo TW 的結構進行特徵搜尋
             
-            # 嘗試抓取主要敘述區塊 (通常在 'Ex(so)' class 或特定的 div 內)
-            # 這是比較通用的抓法：抓取含有大量文字的段落
-            articles = soup.find_all('div', class_='Py(12px)')
+            # MoneyDJ 的簡介通常在一個 table 裡面，標題是 "公司簡介"
+            # 我們找包含大量文字的 td 或 p
+            # 策略：抓出所有文字，過濾掉短的，找最長的那一段
             
-            for art in articles:
-                text = art.get_text().strip()
-                if len(text) > 50: # 假設簡介通常大於 50 字
-                    return text
+            candidates = []
             
-            # 如果上面沒抓到，嘗試另一種常見結構
-            summary_block = soup.find('p', class_='Lh(1.6)')
-            if summary_block:
-                return summary_block.get_text().strip()
+            # 針對 MoneyDJ 結構特徵搜尋
+            # 它的簡介通常在 class="k-card-body" 或特定的 table cell
+            cells = soup.find_all(['td', 'div', 'p'])
+            
+            for cell in cells:
+                text = cell.get_text().strip()
+                # 簡單過濾：長度大於 50 字，且不包含太多換行符號(避免抓到選單)
+                if len(text) > 50 and len(text) < 2000:
+                    candidates.append(text)
+            
+            if candidates:
+                # 回傳長度最長的那一段，通常就是公司簡介
+                return max(candidates, key=len)
                 
         return None
     except Exception:
         return None
 
+def fetch_yahoo_tw(ticker):
+    """
+    爬蟲引擎 2: Yahoo 奇摩股市 (備援)
+    """
+    try:
+        url = f"https://tw.stock.yahoo.com/quote/{ticker}/profile"
+        response = requests.get(url, headers=get_headers(), timeout=5)
+        
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Yahoo 的簡介通常在 "基本資料" 下方
+            # 策略：抓所有 p 標籤，找字數夠多的
+            paragraphs = soup.find_all('p')
+            for p in paragraphs:
+                text = p.get_text().strip()
+                if len(text) > 50:
+                    return text
+            
+            # 備用策略：抓 div
+            divs = soup.find_all('div')
+            for d in divs:
+                text = d.get_text().strip()
+                # Yahoo 簡介通常在 100~1000 字之間
+                if 100 < len(text) < 1500 and "公司簡介" not in text[:10]: 
+                    return text
+        return None
+    except Exception:
+        return None
+
 def show_tradingview_profile(symbol):
-    """TradingView Widget (備案)"""
+    """TradingView Widget (最後防線)"""
     html_code = f"""
     <div class="tradingview-widget-container">
       <div class="tradingview-widget-container__widget"></div>
@@ -92,25 +132,45 @@ def show_tradingview_profile(symbol):
     components.html(html_code, height=360)
 
 def display_issuer_profile(ticker):
-    """整合顯示邏輯：先爬蟲(純文字) -> 失敗則用 Widget"""
+    """
+    整合顯示邏輯：
+    1. 嘗試 MoneyDJ
+    2. 失敗 -> 嘗試 Yahoo
+    3. 失敗 -> 顯示 TradingView Widget
+    """
+    # 建立一個佔位符，顯示正在抓取
+    status_text = st.empty()
+    # status_text.caption(f"🔍 正在搜尋 {ticker} 的中文簡介 (來源: MoneyDJ)...")
     
-    # 1. 嘗試爬取純文字簡介
-    desc_text = get_chinese_description(ticker)
+    # 1. 嘗試 MoneyDJ
+    desc_text = fetch_moneydj(ticker)
+    source = "MoneyDJ 理財網"
+    
+    # 2. 如果 MoneyDJ 沒抓到，嘗試 Yahoo
+    if not desc_text:
+        # status_text.caption(f"⚠️ MoneyDJ 無回應，轉向搜尋 Yahoo 奇摩股市...")
+        desc_text = fetch_yahoo_tw(ticker)
+        source = "Yahoo 奇摩股市"
+    
+    # 清除狀態文字
+    status_text.empty()
     
     if desc_text:
-        # 若成功抓到文字，使用自訂的乾淨排版
+        # 若成功抓到文字
         st.markdown(f"""
-        <div style="background-color:#f0f2f6; padding:15px; border-radius:10px; margin-bottom:20px;">
-            <h4 style="margin-top:0;">🏢 發行機構簡介：{ticker}</h4>
-            <p style="font-size:16px; line-height:1.6; color:#333;">
+        <div style="background-color:#f8f9fa; padding:20px; border-radius:10px; border-left: 5px solid #ff4b4b; margin-bottom:20px; box-shadow: 2px 2px 5px rgba(0,0,0,0.1);">
+            <h4 style="margin-top:0; color:#333;">🏢 發行機構簡介：{ticker}</h4>
+            <p style="font-size:16px; line-height:1.8; color:#444; text-align: justify;">
                 {desc_text}
             </p>
-            <p style="font-size:12px; color:#888; text-align:right;">資料來源：Yahoo 奇摩股市</p>
+            <p style="font-size:12px; color:#888; text-align:right; margin-bottom:0;">
+                資料來源：{source} (純文字提取)
+            </p>
         </div>
         """, unsafe_allow_html=True)
     else:
-        # 2. 若爬取失敗 (例如無資料或被擋)，使用 TradingView Widget 備援
-        st.caption(f"⚠️ 無法取得純文字簡介，切換顯示 TradingView 完整檔案")
+        # 3. 全都失敗，顯示 Widget
+        st.warning(f"⚠️ 無法取得 {ticker} 的純文字簡介，切換至 TradingView 完整模式")
         show_tradingview_profile(ticker)
 
 # --- 以下為既有的回測函數 (保持不變) ---
@@ -143,7 +203,6 @@ def get_stock_data_from_2009(ticker):
         return None, str(e)
 
 def run_comprehensive_backtest(df, ki_pct, strike_pct, months):
-    """綜合回測邏輯"""
     trading_days = int(months * 21)
     bt = df[['Date', 'Close']].copy()
     bt.columns = ['Start_Date', 'Start_Price']
@@ -172,7 +231,6 @@ def run_comprehensive_backtest(df, ki_pct, strike_pct, months):
     choices = ['Loss', 'Safe', 'Safe']
     bt['Result_Type'] = np.select(conditions, choices, default='Unknown')
     
-    # 計算回本天數
     loss_indices = bt[bt['Result_Type'] == 'Loss'].index
     recovery_counts = [] 
     stuck_count = 0
@@ -189,7 +247,6 @@ def run_comprehensive_backtest(df, ki_pct, strike_pct, months):
         else:
             stuck_count += 1
 
-    # Bar圖資料
     def calculate_bar_value(row):
         gap = ((row['Final_Price'] - row['Strike_Level']) / row['Strike_Level']) * 100
         return gap if row['Result_Type'] == 'Loss' else max(0, gap)
@@ -197,7 +254,6 @@ def run_comprehensive_backtest(df, ki_pct, strike_pct, months):
     bt['Bar_Value'] = bt.apply(calculate_bar_value, axis=1)
     bt['Color'] = np.where(bt['Result_Type'] == 'Loss', 'red', 'green')
 
-    # 統計
     total = len(bt)
     safe_count = len(bt[bt['Result_Type'] == 'Safe'])
     safety_prob = (safe_count / total) * 100
@@ -216,21 +272,17 @@ def run_comprehensive_backtest(df, ki_pct, strike_pct, months):
     return bt, stats
 
 def plot_integrated_chart(df, ticker, current_price, p_ko, p_ki, p_st):
-    """主圖：走勢 + 關鍵價位"""
-    plot_df = df.tail(750).copy() # 顯示近3年
+    plot_df = df.tail(750).copy()
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=plot_df['Date'], y=plot_df['Close'], mode='lines', name='股價', line=dict(color='black', width=1.5)))
     fig.add_trace(go.Scatter(x=plot_df['Date'], y=plot_df['MA20'], mode='lines', name='月線', line=dict(color='#3498db', width=1)))
     fig.add_trace(go.Scatter(x=plot_df['Date'], y=plot_df['MA60'], mode='lines', name='季線', line=dict(color='#f1c40f', width=1)))
     fig.add_trace(go.Scatter(x=plot_df['Date'], y=plot_df['MA240'], mode='lines', name='年線', line=dict(color='#9b59b6', width=1)))
 
-    # KO
     fig.add_hline(y=p_ko, line_dash="dash", line_color="red", line_width=2)
     fig.add_annotation(x=1, y=p_ko, xref="paper", yref="y", text=f"KO: {p_ko:.2f}", showarrow=False, xanchor="left", font=dict(color="red"))
-    # Strike
     fig.add_hline(y=p_st, line_dash="solid", line_color="green", line_width=2)
     fig.add_annotation(x=1, y=p_st, xref="paper", yref="y", text=f"Strike: {p_st:.2f}", showarrow=False, xanchor="left", font=dict(color="green"))
-    # KI
     fig.add_hline(y=p_ki, line_dash="dot", line_color="orange", line_width=2)
     fig.add_annotation(x=1, y=p_ki, xref="paper", yref="y", text=f"KI: {p_ki:.2f}", showarrow=False, xanchor="left", font=dict(color="orange"))
 
@@ -241,11 +293,9 @@ def plot_integrated_chart(df, ticker, current_price, p_ko, p_ki, p_st):
     return fig
 
 def plot_rolling_bar_chart(bt_data, ticker):
-    """Bar 圖：回測結果"""
     fig = go.Figure()
     fig.add_trace(go.Bar(x=bt_data['Start_Date'], y=bt_data['Bar_Value'], marker_color=bt_data['Color'], name='期末表現'))
     fig.add_hline(y=0, line_width=1, line_color="black")
-    
     fig.update_layout(title=f"{ticker} - 滾動回測損益分佈 (2009至今)", xaxis_title="進場日期", yaxis_title="期末距離 Strike (%)", height=350, margin=dict(l=20, r=20, t=40, b=20), showlegend=False, hovermode="x unified")
     return fig
 
@@ -260,7 +310,7 @@ if run_btn:
         for ticker in ticker_list:
             st.markdown(f"### 📌 標的：{ticker}")
 
-            # ★★★ 呼叫整合後的顯示函數 (純文字優先 -> 失敗才用 Widget) ★★★
+            # ★★★ 呼叫顯示函數 (MoneyDJ -> Yahoo -> Widget) ★★★
             display_issuer_profile(ticker)
             
             with st.spinner(f"正在分析 {ticker} (2009-Now) ..."):
@@ -285,24 +335,15 @@ if run_btn:
                 st.warning("資料不足")
                 continue
 
-            # ==========================================
-            # 1. 四大重點指標 (價位)
-            # ==========================================
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("最新股價", f"{current_price:.2f}")
             c2.metric(f"KO ({ko_pct}%)", f"{p_ko:.2f}", help="若股價高於此，提前獲利出場")
             c3.metric(f"KI ({ki_pct}%)", f"{p_ki:.2f}", help="若股價跌破此，保護消失", delta_color="inverse")
             c4.metric(f"Strike ({strike_pct}%)", f"{p_st:.2f}", help="期初價格或接股成本")
 
-            # ==========================================
-            # 2. 走勢及關鍵價位圖 (主圖)
-            # ==========================================
             fig_main = plot_integrated_chart(df, ticker, current_price, p_ko, p_ki, p_st)
             st.plotly_chart(fig_main, use_container_width=True)
 
-            # ==========================================
-            # 3. 藍底解釋 (AI 解讀)
-            # ==========================================
             loss_pct = 100 - stats['safety_prob']
             stuck_rate = 0
             if stats['loss_count'] > 0:
@@ -323,9 +364,6 @@ if run_btn:
                 *(註：在所有接股票的案例中，約有 {stuck_rate:.1f}% 的情況截至目前尚未解套)*
             """)
 
-            # ==========================================
-            # 4. 回測圖 (Bar Chart)
-            # ==========================================
             st.subheader("📉 歷史滾動回測結果")
             st.caption("🟩 **綠色**：安全 (拿回本金) ｜ 🟥 **紅色**：接股票 (虧損幅度)")
             fig_bar = plot_rolling_bar_chart(bt_data, ticker)
@@ -336,9 +374,6 @@ if run_btn:
 else:
     st.info("👈 請在左側設定參數，按下「開始分析」。")
 
-# ==========================================
-# 5. 底部警語
-# ==========================================
 st.markdown("""
 <style>
 .disclaimer-box {
