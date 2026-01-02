@@ -4,12 +4,14 @@ import pandas as pd
 import yfinance as yf
 import numpy as np
 import streamlit.components.v1 as components
-from datetime import datetime
+import requests
+import time
+import random
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="結構型商品戰情室 (V38.0)", layout="wide")
+st.set_page_config(page_title="結構型商品戰情室 (V39.0)", layout="wide")
 st.title("📊 結構型商品 - 關鍵點位與長週期風險回測")
-st.markdown("回測區間：**2009/01/01 至今**。資料源：**Yahoo Finance (股價) / TradingView (簡介)**。")
+st.markdown("回測區間：**2009/01/01 至今**。資料源：**Yahoo Finance (防擋機制增強版)**。")
 st.divider()
 
 # --- 2. 側邊欄 ---
@@ -32,12 +34,7 @@ run_btn = st.sidebar.button("🚀 開始分析", type="primary")
 # --- 3. 核心函數：TradingView (放大版) ---
 
 def show_tradingview_widget_zoomed(symbol):
-    """
-    使用 CSS transform 將 TradingView Widget 強制放大 1.2 倍，
-    以解決原廠字體過小的問題。
-    """
-    # 我們在外面包一層 div，設定 transform: scale(1.2)
-    # width: 83% 是因為放大 1.2 倍後，原本的 100% 寬度會變成 120% 導致爆版，所以要縮小容器寬度 (100/1.2 = 83.3)
+    """放大 1.2 倍的 TradingView 簡介"""
     html_code = f"""
     <div style="transform: scale(1.2); transform-origin: top left; width: 83%;">
         <div class="tradingview-widget-container">
@@ -55,28 +52,55 @@ def show_tradingview_widget_zoomed(symbol):
         </div>
     </div>
     """
-    # 高度也要配合放大，原本 350 * 1.2 = 420，設大一點避免截斷
     components.html(html_code, height=430)
 
-# --- 4. 回測核心邏輯 (維持不變) ---
+# --- 4. 核心函數：強力抓股價 (新增防擋機制) ---
 
-def get_stock_data_from_2009(ticker):
-    try:
-        start_date = "2009-01-01"
-        df = yf.download(ticker, start=start_date, progress=False)
-        if df.empty: return None, f"無資料"
-        df = df.reset_index()
-        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-        df = df.loc[:, ~df.columns.duplicated()]
-        if 'Close' not in df.columns: return None, "無收盤價"
-        df['Date'] = pd.to_datetime(df['Date'])
-        df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
-        df = df.dropna(subset=['Close'])
-        df['MA20'] = df['Close'].rolling(window=20).mean()
-        df['MA60'] = df['Close'].rolling(window=60).mean()
-        df['MA240'] = df['Close'].rolling(window=240).mean()
-        return df, None
-    except Exception as e: return None, str(e)
+@st.cache_data(ttl=3600) # 快取 1 小時，減少請求次數
+def get_stock_data_robust(ticker):
+    """
+    具備重試機制與偽裝 header 的抓取函數
+    """
+    # 偽裝成 Chrome 瀏覽器
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    })
+
+    # 最多重試 3 次
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            start_date = "2009-01-01"
+            # 這裡不使用 progress bar 以免干擾
+            df = yf.download(ticker, start=start_date, progress=False, session=session)
+            
+            if not df.empty:
+                # 資料整理
+                df = df.reset_index()
+                if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+                df = df.loc[:, ~df.columns.duplicated()]
+                
+                if 'Close' not in df.columns: return None, "資料格式錯誤 (無 Close)"
+                
+                df['Date'] = pd.to_datetime(df['Date'])
+                df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
+                df = df.dropna(subset=['Close'])
+                
+                # 計算均線
+                df['MA20'] = df['Close'].rolling(window=20).mean()
+                df['MA60'] = df['Close'].rolling(window=60).mean()
+                df['MA240'] = df['Close'].rolling(window=240).mean()
+                
+                return df, None # 成功回傳
+            
+        except Exception as e:
+            # 如果失敗，休息一下再試 (Exponential Backoff)
+            time.sleep(random.uniform(1, 3))
+            if attempt == max_retries - 1:
+                return None, f"連線失敗 ({str(e)})"
+    
+    return None, "查無資料或被封鎖，請稍後再試"
 
 def run_backtest(df, ki_pct, strike_pct, months):
     trading_days = int(months * 21)
@@ -162,12 +186,14 @@ if run_btn:
         st.subheader("🏢 發行機構簡介")
         show_tradingview_widget_zoomed(ticker)
         
-        # 2. 執行回測
-        with st.spinner(f"正在計算 {ticker} 數據..."):
-            df, err = get_stock_data_from_2009(ticker)
+        # 2. 執行回測 (使用新版 robust 函數)
+        with st.spinner(f"正在計算 {ticker} 數據 (嘗試連線中)..."):
+            # 使用新的 get_stock_data_robust 函數
+            df, err = get_stock_data_robust(ticker)
             
             if err:
-                st.error(f"{ticker} 資料讀取錯誤")
+                st.error(f"{ticker} 資料讀取錯誤：{err}")
+                st.caption("建議：請稍候幾秒再試，或檢查代碼是否正確。")
                 continue
                 
             current_price = df['Close'].iloc[-1]
