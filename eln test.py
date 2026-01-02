@@ -9,9 +9,9 @@ from bs4 import BeautifulSoup
 import random
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="結構型商品戰情室 (V29.0)", layout="wide")
+st.set_page_config(page_title="結構型商品戰情室 (V30.0)", layout="wide")
 st.title("📊 結構型商品 - 關鍵點位與長週期風險回測")
-st.markdown("回測區間：**2009/01/01 至今**。資料源：**MoneyDJ (優先) / Yahoo TW (備援)**")
+st.markdown("回測區間：**2009/01/01 至今**。資料源：**MoneyDJ (經營概述)**。")
 st.divider()
 
 # --- 2. 側邊欄 ---
@@ -31,84 +31,82 @@ period_months = st.sidebar.number_input("觀察天期 (月)", min_value=1, max_v
 
 run_btn = st.sidebar.button("🚀 開始分析", type="primary")
 
-# --- 3. 核心函數：精準爬蟲 ---
+# --- 3. 核心函數：精準爬蟲 (MoneyDJ 經營概述) ---
 
 def get_headers():
-    """偽裝成真實瀏覽器，避免被 MoneyDJ 視為機器人"""
+    """偽裝成真實瀏覽器"""
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+    ]
     return {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+        "User-Agent": random.choice(user_agents),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Referer": "https://www.moneydj.com/"
     }
 
-def fetch_moneydj_profile(ticker):
+def fetch_moneydj_overview(ticker):
     """
-    爬取 MoneyDJ -> 基本資料 -> 公司資料 (rgprofile)
+    目標：MoneyDJ 美股 -> 基本資料 (basic0001.xdjhtm) -> 找「經營概述」
     """
     try:
-        # 這是 MoneyDJ 美股「公司資料」的專屬路徑
-        url = f"https://www.moneydj.com/us/basic/uslookup.svc/rgprofile?stk={ticker}"
+        # 正確的基本資料頁面路徑
+        url = f"https://www.moneydj.com/us/basic/basic0001.xdjhtm?a={ticker}"
         
-        # 使用 Session 來維持連線狀態
-        session = requests.Session()
-        response = session.get(url, headers=get_headers(), timeout=5)
-        response.encoding = 'utf-8'
+        response = requests.get(url, headers=get_headers(), timeout=6)
+        response.encoding = 'utf-8' # 強制編碼
 
         if response.status_code == 200:
+            # 檢查是否被轉址到錯誤頁面 (標題是否包含代碼)
+            if ticker not in response.text and ticker.lower() not in response.text:
+                return None
+
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # MoneyDJ 結構特徵：
-            # 公司簡介通常放在一個 table 裡面，標題是 "經營概述" 或 "公司簡介"
-            # 我們直接抓取含有大量文字的 <article> 或 <td>
+            # MoneyDJ 的資料通常在表格 (table) 裡
+            # 我們搜尋所有的 table row (tr)
+            rows = soup.find_all('tr')
             
-            # 策略 1: 抓取 article (MoneyDJ 常用)
+            for row in rows:
+                # 找表頭 (th) 或第一格 (td) 是 "經營概述" 的那一列
+                text_content = row.get_text()
+                if "經營概述" in text_content:
+                    # 找到該列後，抓取該列的第二個欄位 (td)
+                    # 通常結構是: <th>經營概述</th> <td>內容...</td>
+                    cells = row.find_all(['td', 'th'])
+                    # 我們要把含有長文字的那一格抓出來
+                    for cell in cells:
+                        cell_text = cell.get_text().strip()
+                        # 排除掉標題本身，且長度足夠長
+                        if "經營概述" not in cell_text and len(cell_text) > 20:
+                            return cell_text
+                            
+            # 備用方案：如果表格結構改變，嘗試抓取 article
             article = soup.find('article')
             if article:
-                text = article.get_text().strip()
-                if len(text) > 50: return text
+                return article.get_text().strip()
 
-            # 策略 2: 抓取表格內容
-            # 尋找所有 td，如果內容包含中文且長度夠長，通常就是簡介
-            tds = soup.find_all('td')
-            for td in tds:
-                text = td.get_text().strip()
-                # 排除選單文字，通常簡介會很長
-                if len(text) > 100 and "公司簡介" not in text[:20]:
-                    return text
-                    
         return None
     except Exception:
         return None
 
-def fetch_yahoo_tw_profile(ticker):
-    """
-    備援：爬取 Yahoo 奇摩股市 (美股)
-    """
+def fetch_yahoo_fallback(ticker):
+    """備援：Yahoo 奇摩股市 (內容通常與 MoneyDJ 雷同)"""
     try:
         url = f"https://tw.stock.yahoo.com/quote/{ticker}/profile"
         response = requests.get(url, headers=get_headers(), timeout=5)
-        
         if response.status_code == 200:
             soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Yahoo 的簡介通常在 class="Py(12px)" 或 "Mb(20px)" 的 div 裡
-            # 我們直接找頁面中「字數最多」的那個段落 (p tag)
+            # 找字數最多的段落
             paragraphs = soup.find_all('p')
-            
-            # 過濾出最有可能是簡介的段落
-            candidates = [p.get_text().strip() for p in paragraphs if len(p.get_text().strip()) > 100]
-            
-            if candidates:
-                # 回傳最長的那一段
-                return max(candidates, key=len)
-                
+            candidates = [p.get_text().strip() for p in paragraphs if len(p.get_text().strip()) > 50]
+            if candidates: return max(candidates, key=len)
         return None
     except Exception:
         return None
 
 def show_tradingview_widget(symbol):
-    """最後防線：TradingView Widget"""
+    """最後防線：Widget"""
     html_code = f"""
     <div class="tradingview-widget-container">
       <div class="tradingview-widget-container__widget"></div>
@@ -127,40 +125,35 @@ def show_tradingview_widget(symbol):
     components.html(html_code, height=310)
 
 def display_smart_profile(ticker):
-    """
-    智慧顯示邏輯：
-    1. 先試 MoneyDJ (精準路徑)
-    2. 失敗 -> 試 Yahoo TW
-    3. 失敗 -> 顯示 TradingView Widget
-    """
-    # 建立一個容器，避免畫面跳動
+    """整合顯示"""
     container = st.container()
     
-    # 1. 嘗試 MoneyDJ
-    desc = fetch_moneydj_profile(ticker)
+    # 1. 優先嘗試 MoneyDJ (經營概述)
+    desc = fetch_moneydj_overview(ticker)
     source = "MoneyDJ 理財網"
     
-    # 2. 如果 MoneyDJ 失敗 (回傳 None 或太短)，切換 Yahoo
-    if not desc or len(desc) < 50:
-        desc = fetch_yahoo_tw_profile(ticker)
-        source = "Yahoo 奇摩股市"
+    # 2. 失敗則用 Yahoo
+    if not desc:
+        desc = fetch_yahoo_fallback(ticker)
+        source = "Yahoo 奇摩股市 (備援)"
     
-    if desc and len(desc) > 50:
-        # 成功抓到純文字
+    # 3. 顯示結果
+    if desc and len(desc) > 30:
+        # 成功抓到文字
         container.markdown(f"""
-        <div style="background-color:#f8f9fa; padding:15px; border-radius:10px; border-left: 5px solid #ff4b4b; margin-bottom:20px;">
-            <h4 style="margin-top:0; color:#333;">🏢 發行機構簡介：{ticker}</h4>
-            <p style="font-size:15px; line-height:1.6; color:#444; text-align: justify; margin-bottom: 5px;">
+        <div style="background-color:#f8f9fa; padding:20px; border-radius:10px; border-left: 5px solid #d93025; margin-bottom:20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <h4 style="margin-top:0; color:#202124; font-family:'Microsoft JhengHei';">🏢 {ticker} 經營概述</h4>
+            <p style="font-size:15px; line-height:1.8; color:#3c4043; text-align: justify; margin-bottom: 10px;">
                 {desc}
             </p>
-            <div style="text-align:right; font-size:12px; color:#888;">
+            <div style="text-align:right; font-size:12px; color:#5f6368;">
                 資料來源：{source}
             </div>
         </div>
         """, unsafe_allow_html=True)
     else:
-        # 3. 都失敗，顯示 Widget
-        container.warning(f"⚠️ 無法取得中文純文字簡介，切換至 TradingView 完整模式")
+        # 都失敗則顯示 Widget
+        container.warning("⚠️ 無法取得文字簡介，切換至 TradingView 模式")
         show_tradingview_widget(ticker)
 
 # --- 4. 回測核心邏輯 (維持不變) ---
@@ -212,7 +205,6 @@ def run_backtest(df, ki_pct, strike_pct, months):
     safety_prob = (safe_count / total) * 100
     pos_prob = (len(bt[bt['Final_Price'] > bt['Start_Price']]) / total) * 100
     
-    # 損失恢復天數
     loss_idx = bt[bt['Result_Type'] == 'Loss'].index
     recov_days = []
     stuck = 0
@@ -238,7 +230,7 @@ if run_btn:
     ticker_list = [t.strip().upper() for t in tickers_input.split(',') if t.strip()]
     
     for ticker in ticker_list:
-        # 1. 顯示智慧簡介 (MoneyDJ -> Yahoo -> Widget)
+        # 1. 顯示智慧簡介 (MoneyDJ -> Yahoo)
         display_smart_profile(ticker)
         
         # 2. 執行回測
@@ -256,14 +248,16 @@ if run_btn:
             
             bt_data, stats = run_backtest(df, ki_pct, strike_pct, period_months)
             
-            # 3. 顯示重點指標
+            if bt_data is None:
+                st.warning("資料不足")
+                continue
+
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("最新股價", f"{current_price:.2f}")
             c2.metric(f"KO ({ko_pct}%)", f"{p_ko:.2f}")
             c3.metric(f"KI ({ki_pct}%)", f"{p_ki:.2f}", delta_color="inverse")
             c4.metric(f"Strike ({strike_pct}%)", f"{p_st:.2f}")
             
-            # 4. 顯示主圖
             plot_df = df.tail(750)
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=plot_df['Date'], y=plot_df['Close'], line=dict(color='black'), name='股價'))
@@ -273,7 +267,6 @@ if run_btn:
             fig.update_layout(title=f"{ticker} 關鍵點位 (近3年)", height=400, margin=dict(l=20,r=20,t=40,b=20))
             st.plotly_chart(fig, use_container_width=True)
             
-            # 5. 顯示解釋文字
             st.info(f"""
             **📊 {ticker} 分析報告：**
             * **獲利機率**：{stats['pos']:.1f}% (期末股價上漲)
@@ -281,10 +274,29 @@ if run_btn:
             * **風險情境**：若不幸接股 (機率 {100-stats['safety']:.1f}%)，平均需等待 **{stats['rec_days']:.0f} 天** 解套。
             """)
             
-            # 6. 顯示 Bar Chart
             fig_bar = go.Figure()
             fig_bar.add_trace(go.Bar(x=bt_data['Start_Date'], y=bt_data['Bar_Value'], marker_color=bt_data['Color']))
             fig_bar.update_layout(title="歷史回測損益分佈", height=300, margin=dict(l=20,r=20,t=40,b=20), showlegend=False)
             st.plotly_chart(fig_bar, use_container_width=True)
             
             st.markdown("---")
+
+else:
+    st.info("👈 請在左側設定參數，按下「開始分析」。")
+
+st.markdown("""
+<style>
+.disclaimer-box {
+    background-color: #fff3f3;
+    border: 1px solid #e0b4b4;
+    padding: 15px;
+    border-radius: 5px;
+    color: #8a1f1f;
+    font-size: 0.9em;
+    margin-top: 30px;
+}
+</style>
+<div class='disclaimer-box'>
+    <strong>⚠️ 免責聲明</strong>：本工具僅供教學與模擬試算，不代表投資建議。股價資料來源為 Yahoo Finance，發行機構簡介來源為 MoneyDJ/Yahoo 股市。
+</div>
+""", unsafe_allow_html=True)
