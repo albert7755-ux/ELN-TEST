@@ -7,9 +7,9 @@ import streamlit.components.v1 as components
 from deep_translator import GoogleTranslator
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="結構型商品戰情室 (V34.0)", layout="wide")
+st.set_page_config(page_title="結構型商品戰情室 (V35.0)", layout="wide")
 st.title("📊 結構型商品 - 關鍵點位與長週期風險回測")
-st.markdown("回測區間：**2009/01/01 至今**。資料源：**官方資料庫直連 (無廣告)**。")
+st.markdown("回測區間：**2009/01/01 至今**。資料源：**官方資料庫 (修正版)**。")
 st.divider()
 
 # --- 2. 側邊欄 ---
@@ -32,32 +32,24 @@ run_btn = st.sidebar.button("🚀 開始分析", type="primary")
 # --- 3. 核心函數：API 取資料 + AI 翻譯 ---
 
 def get_clean_profile(ticker):
-    """
-    透過 API 取得官方簡介並翻譯，完全避開網頁廣告。
-    """
+    """取得官方簡介並翻譯"""
     try:
-        # 1. 連線官方資料庫
         tk = yf.Ticker(ticker)
-        
-        # 2. 取得 "longBusinessSummary" (這是純文字，沒有任何廣告 HTML)
         eng_summary = tk.info.get('longBusinessSummary', None)
         
         if not eng_summary:
             return None, "官方資料庫無簡介"
             
-        # 3. 呼叫 Google 翻譯 (英 -> 繁中)
         translator = GoogleTranslator(source='auto', target='zh-TW')
-        
-        # 為了翻譯速度與準確度，我們取前 3000 個字元 (通常足夠涵蓋重點)
+        # 取前 3000 字元翻譯，避免超時
         cht_summary = translator.translate(eng_summary[:3000])
         
         return cht_summary, "美股官方資料庫 (AI 翻譯)"
-        
     except Exception as e:
         return None, str(e)
 
 def show_tradingview_widget(symbol):
-    """備案：如果連 API 都失敗才顯示這個"""
+    """備案 Widget"""
     html_code = f"""
     <div class="tradingview-widget-container">
       <div class="tradingview-widget-container__widget"></div>
@@ -76,14 +68,11 @@ def show_tradingview_widget(symbol):
     components.html(html_code, height=310)
 
 def display_smart_profile(ticker):
-    """顯示邏輯"""
+    """顯示簡介"""
     container = st.container()
-    
-    # 呼叫純淨函數
     desc, source = get_clean_profile(ticker)
     
     if desc:
-        # 成功！
         container.markdown(f"""
         <div style="background-color:#f8f9fa; padding:20px; border-radius:10px; border-left: 5px solid #0068c9; margin-bottom:20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
             <h4 style="margin-top:0; color:#202124;">🏢 {ticker} 發行機構簡介</h4>
@@ -96,11 +85,10 @@ def display_smart_profile(ticker):
         </div>
         """, unsafe_allow_html=True)
     else:
-        # 萬一失敗
         container.warning("⚠️ 簡介載入異常，切換至 TradingView 模式")
         show_tradingview_widget(ticker)
 
-# --- 4. 回測核心邏輯 (維持不變) ---
+# --- 4. 回測核心邏輯 (已修正變數名稱) ---
 
 def get_stock_data_from_2009(ticker):
     try:
@@ -164,7 +152,14 @@ def run_backtest(df, ki_pct, strike_pct, months):
                                np.maximum(0, ((bt['Final_Price'] - bt['Strike_Level'])/bt['Strike_Level'])*100))
     bt['Color'] = np.where(bt['Result_Type'] == 'Loss', 'red', 'green')
     
-    return bt, {'safety': safety_prob, 'pos': pos_prob, 'loss_cnt': len(loss_idx), 'stuck': stuck, 'rec_days': avg_rec}
+    # [修正點] 這裡統一回傳完整的鍵值名稱，避免 KeyError
+    return bt, {
+        'safety_prob': safety_prob, 
+        'positive_prob': pos_prob, 
+        'loss_count': len(loss_idx), 
+        'stuck_count': stuck, 
+        'avg_recovery': avg_rec
+    }
 
 def plot_integrated_chart(df, ticker, current_price, p_ko, p_ki, p_st):
     plot_df = df.tail(750).copy()
@@ -194,7 +189,7 @@ if run_btn:
     for ticker in ticker_list:
         st.markdown(f"### 📌 標的：{ticker}")
 
-        # 1. 顯示純淨版簡介 (API + 翻譯)
+        # 1. 顯示簡介 (API + 翻譯)
         display_smart_profile(ticker)
         
         # 2. 執行回測
@@ -225,15 +220,18 @@ if run_btn:
             fig_main = plot_integrated_chart(df, ticker, current_price, p_ko, p_ki, p_st)
             st.plotly_chart(fig_main, use_container_width=True)
             
+            # [修正點] 這裡使用正確的鍵值名稱，解決 KeyError
             loss_pct = 100 - stats['safety_prob']
             stuck_rate = 0
             if stats['loss_count'] > 0:
                 stuck_rate = (stats['stuck_count'] / stats['loss_count']) * 100
             
             st.info(f"""
-            **📊 回測結果：**
-            * **本金安全率**：{stats['safety']:.1f}% (過去16年未發生虧損的機率)
-            * **解套時間**：若不幸發生虧損，平均需 **{stats['rec_days']:.0f} 天** 股價可漲回 Strike。
+            **📊 {ticker} 分析報告：**
+            * **獲利機率**：{stats['positive_prob']:.1f}% (期末股價上漲)
+            * **本金安全率**：{stats['safety_prob']:.1f}% (未跌破 KI 或漲回)
+            * **風險情境**：若不幸接股 (機率 {loss_pct:.1f}%)，平均需等待 **{stats['avg_recovery']:.0f} 天** 解套。
+            *(註：在所有接股票的案例中，約有 {stuck_rate:.1f}% 的情況截至目前尚未解套)*
             """)
             
             fig_bar = go.Figure()
