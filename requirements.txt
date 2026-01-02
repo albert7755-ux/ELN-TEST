@@ -5,3 +5,4 @@ plotly
 requests
 beautifulsoup4
 lxml
+deep-translator
