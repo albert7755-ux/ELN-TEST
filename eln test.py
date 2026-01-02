@@ -3,11 +3,13 @@ import plotly.graph_objects as go
 import pandas as pd
 import yfinance as yf
 import numpy as np
-import streamlit.components.v1 as components # <--- 新增這行：為了嵌入網頁小工具
+import streamlit.components.v1 as components
+import requests
+from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="結構型商品戰情室 (V10.1 + 機構簡介)", layout="wide")
+st.set_page_config(page_title="結構型商品戰情室 (V27.0)", layout="wide")
 st.title("📊 結構型商品 - 關鍵點位與長週期風險回測")
 st.markdown("回測區間：**2009/01/01 至今**。報告順序優化：**獲利潛力 -> 安全性 -> 解套時間**。")
 st.divider()
@@ -33,9 +35,45 @@ run_btn = st.sidebar.button("🚀 開始分析", type="primary")
 
 # --- 3. 核心函數 ---
 
-# ★★★ 新增：TradingView 機構簡介函數 ★★★
+def get_chinese_description(ticker):
+    """
+    嘗試爬取中文簡介 (優先使用 Yahoo 奇摩股市，因為 MoneyDJ 雲端易擋且結構複雜)
+    只回傳「純文字簡介」，不包含產業、員工等資訊。
+    """
+    try:
+        # Yahoo 奇摩股市美股個股檔案 URL
+        url = f"https://tw.stock.yahoo.com/quote/{ticker}/profile"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        
+        response = requests.get(url, headers=headers, timeout=3)
+        
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            # 尋找簡介區塊 (Yahoo TW 的結構通常在一個特定的 section 或是 p 標籤)
+            # 這裡針對 Yahoo TW 的結構進行特徵搜尋
+            
+            # 嘗試抓取主要敘述區塊 (通常在 'Ex(so)' class 或特定的 div 內)
+            # 這是比較通用的抓法：抓取含有大量文字的段落
+            articles = soup.find_all('div', class_='Py(12px)')
+            
+            for art in articles:
+                text = art.get_text().strip()
+                if len(text) > 50: # 假設簡介通常大於 50 字
+                    return text
+            
+            # 如果上面沒抓到，嘗試另一種常見結構
+            summary_block = soup.find('p', class_='Lh(1.6)')
+            if summary_block:
+                return summary_block.get_text().strip()
+                
+        return None
+    except Exception:
+        return None
+
 def show_tradingview_profile(symbol):
-    """使用 HTML iframe 嵌入 TradingView 的 Company Profile Widget"""
+    """TradingView Widget (備案)"""
     html_code = f"""
     <div class="tradingview-widget-container">
       <div class="tradingview-widget-container__widget"></div>
@@ -52,6 +90,30 @@ def show_tradingview_profile(symbol):
     </div>
     """
     components.html(html_code, height=360)
+
+def display_issuer_profile(ticker):
+    """整合顯示邏輯：先爬蟲(純文字) -> 失敗則用 Widget"""
+    
+    # 1. 嘗試爬取純文字簡介
+    desc_text = get_chinese_description(ticker)
+    
+    if desc_text:
+        # 若成功抓到文字，使用自訂的乾淨排版
+        st.markdown(f"""
+        <div style="background-color:#f0f2f6; padding:15px; border-radius:10px; margin-bottom:20px;">
+            <h4 style="margin-top:0;">🏢 發行機構簡介：{ticker}</h4>
+            <p style="font-size:16px; line-height:1.6; color:#333;">
+                {desc_text}
+            </p>
+            <p style="font-size:12px; color:#888; text-align:right;">資料來源：Yahoo 奇摩股市</p>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        # 2. 若爬取失敗 (例如無資料或被擋)，使用 TradingView Widget 備援
+        st.caption(f"⚠️ 無法取得純文字簡介，切換顯示 TradingView 完整檔案")
+        show_tradingview_profile(ticker)
+
+# --- 以下為既有的回測函數 (保持不變) ---
 
 def get_stock_data_from_2009(ticker):
     try:
@@ -198,8 +260,8 @@ if run_btn:
         for ticker in ticker_list:
             st.markdown(f"### 📌 標的：{ticker}")
 
-            # ★★★ 新增：在這裡呼叫 TradingView Widget ★★★
-            show_tradingview_profile(ticker)
+            # ★★★ 呼叫整合後的顯示函數 (純文字優先 -> 失敗才用 Widget) ★★★
+            display_issuer_profile(ticker)
             
             with st.spinner(f"正在分析 {ticker} (2009-Now) ..."):
                 df, err = get_stock_data_from_2009(ticker)
@@ -239,7 +301,7 @@ if run_btn:
             st.plotly_chart(fig_main, use_container_width=True)
 
             # ==========================================
-            # 3. 藍底解釋 (AI 解讀) - 已調整順序
+            # 3. 藍底解釋 (AI 解讀)
             # ==========================================
             loss_pct = 100 - stats['safety_prob']
             stuck_rate = 0
