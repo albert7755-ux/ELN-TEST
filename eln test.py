@@ -4,14 +4,12 @@ import pandas as pd
 import yfinance as yf
 import numpy as np
 import streamlit.components.v1 as components
-import requests
-import urllib.parse
-from deep_translator import GoogleTranslator
+from datetime import datetime
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="結構型商品戰情室 (V37.0)", layout="wide")
+st.set_page_config(page_title="結構型商品戰情室 (V38.0)", layout="wide")
 st.title("📊 結構型商品 - 關鍵點位與長週期風險回測")
-st.markdown("資料源：**Yahoo Finance JSON (Proxy跳板) + AI 翻譯** -> **保證純文字/無廣告**")
+st.markdown("回測區間：**2009/01/01 至今**。資料源：**Yahoo Finance (股價) / TradingView (簡介)**。")
 st.divider()
 
 # --- 2. 側邊欄 ---
@@ -31,102 +29,36 @@ period_months = st.sidebar.number_input("觀察天期 (月)", min_value=1, max_v
 
 run_btn = st.sidebar.button("🚀 開始分析", type="primary")
 
-# --- 3. 核心函數：JSON Proxy 抓取 (最乾淨的來源) ---
+# --- 3. 核心函數：TradingView (放大版) ---
 
-@st.cache_data(ttl=3600)
-def get_pure_text_profile(ticker):
+def show_tradingview_widget_zoomed(symbol):
     """
-    透過 Proxy 請求 Yahoo Finance 的 JSON API，直接取得 longBusinessSummary。
-    避開網頁爬蟲的所有廣告和雜訊。
+    使用 CSS transform 將 TradingView Widget 強制放大 1.2 倍，
+    以解決原廠字體過小的問題。
     """
-    try:
-        # 1. 設定 Yahoo Finance 的 JSON API URL
-        # modules=assetProfile 裡面包含了公司簡介
-        target_url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}?modules=assetProfile"
-        
-        # 2. 透過 allorigins 跳板請求 (繞過 Streamlit Cloud IP 封鎖)
-        encoded_url = urllib.parse.quote(target_url)
-        proxy_url = f"https://api.allorigins.win/get?url={encoded_url}"
-        
-        response = requests.get(proxy_url, timeout=10)
-        
-        if response.status_code == 200:
-            data = response.json()
-            # Proxy 回傳的內容在 contents 裡，且是字串格式，需轉回 JSON
-            import json
-            inner_data = json.loads(data['contents'])
-            
-            # 3. 解析 JSON 路徑，提取簡介
-            # 路徑: quoteSummary -> result[0] -> assetProfile -> longBusinessSummary
-            summary = inner_data.get('quoteSummary', {}).get('result', [{}])[0].get('assetProfile', {}).get('longBusinessSummary', None)
-            
-            if summary:
-                # 4. 進行翻譯
-                translator = GoogleTranslator(source='auto', target='zh-TW')
-                cht_summary = translator.translate(summary[:3000]) # 翻譯前3000字
-                return cht_summary
-                
-        return None
-        
-    except Exception as e:
-        # 若發生任何錯誤 (JSON 解析失敗、連線失敗)，回傳 None
-        return None
-
-def show_tradingview_widget(symbol):
-    """備案：只有在真的抓不到文字時才顯示這個"""
+    # 我們在外面包一層 div，設定 transform: scale(1.2)
+    # width: 83% 是因為放大 1.2 倍後，原本的 100% 寬度會變成 120% 導致爆版，所以要縮小容器寬度 (100/1.2 = 83.3)
     html_code = f"""
-    <div class="tradingview-widget-container">
-      <div class="tradingview-widget-container__widget"></div>
-      <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-symbol-profile.js" async>
-      {{
-      "width": "100%",
-      "height": "300",
-      "colorTheme": "light",
-      "isTransparent": false,
-      "symbol": "{symbol}",
-      "locale": "zh_TW"
-      }}
-      </script>
+    <div style="transform: scale(1.2); transform-origin: top left; width: 83%;">
+        <div class="tradingview-widget-container">
+          <div class="tradingview-widget-container__widget"></div>
+          <script type="text/javascript" src="https://s3.tradingview.com/external-embedding/embed-widget-symbol-profile.js" async>
+          {{
+          "width": "100%",
+          "height": "350",
+          "colorTheme": "light",
+          "isTransparent": false,
+          "symbol": "{symbol}",
+          "locale": "zh_TW"
+          }}
+          </script>
+        </div>
     </div>
     """
-    components.html(html_code, height=310)
+    # 高度也要配合放大，原本 350 * 1.2 = 420，設大一點避免截斷
+    components.html(html_code, height=430)
 
-def display_clean_profile(ticker):
-    """只顯示敘述，不要列式"""
-    container = st.container()
-    
-    # 嘗試取得純文字
-    desc = get_pure_text_profile(ticker)
-    
-    if desc:
-        # 成功！使用最乾淨的排版
-        container.markdown(f"""
-        <div style="
-            background-color: #f8f9fa; 
-            padding: 20px; 
-            border-radius: 8px; 
-            border-left: 5px solid #0068c9; 
-            margin-bottom: 20px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-        ">
-            <h4 style="margin-top: 0; margin-bottom: 10px; color: #333;">🏢 {ticker} 發行機構簡介</h4>
-            <p style="
-                font-size: 16px; 
-                line-height: 1.8; 
-                color: #444; 
-                text-align: justify; 
-                margin: 0;
-            ">
-                {desc}
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        # 萬一連 API 都失敗，只好顯示 TradingView (但這是非不得已)
-        container.warning("⚠️ 文字資料暫時無法取得，顯示標準檔案：")
-        show_tradingview_widget(ticker)
-
-# --- 4. 回測核心 (維持不變) ---
+# --- 4. 回測核心邏輯 (維持不變) ---
 
 def get_stock_data_from_2009(ticker):
     try:
@@ -226,8 +158,9 @@ if run_btn:
     for ticker in ticker_list:
         st.markdown(f"### 📌 標的：{ticker}")
 
-        # 1. 顯示純淨簡介 (JSON 直連)
-        display_clean_profile(ticker)
+        # 1. 顯示放大版 TradingView Widget
+        st.subheader("🏢 發行機構簡介")
+        show_tradingview_widget_zoomed(ticker)
         
         # 2. 執行回測
         with st.spinner(f"正在計算 {ticker} 數據..."):
@@ -293,6 +226,6 @@ st.markdown("""
 }
 </style>
 <div class='disclaimer-box'>
-    <strong>⚠️ 免責聲明</strong>：本工具僅供教學與模擬試算，不代表投資建議。
+    <strong>⚠️ 免責聲明</strong>：本工具僅供教學與模擬試算，不代表投資建議。簡介資料來源為 TradingView。
 </div>
 """, unsafe_allow_html=True)
