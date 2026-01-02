@@ -3,5 +3,4 @@ pandas
 yfinance
 plotly
 requests
-beautifulsoup4
 deep-translator
