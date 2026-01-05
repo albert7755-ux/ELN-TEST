@@ -6,9 +6,9 @@ import numpy as np
 from datetime import datetime, timedelta
 
 # --- 1. 基礎設定 ---
-st.set_page_config(page_title="結構型商品戰情室 (V10.2 - 含配息試算)", layout="wide")
+st.set_page_config(page_title="結構型商品戰情室 (V10.3)", layout="wide")
 st.title("📊 結構型商品 - 關鍵點位與長週期風險回測")
-st.markdown("回測區間：**2009/01/01 至今**。新增功能：**現金流配息試算**。")
+st.markdown("回測區間：**2009/01/01 至今**。報告順序優化：**獲利潛力 -> 安全性 -> 解套時間**。")
 st.divider()
 
 # --- 2. 側邊欄：參數設定 ---
@@ -25,7 +25,7 @@ strike_pct = st.sidebar.number_input("Strike (轉換/執行價 %)", value=80.0, 
 ki_pct = st.sidebar.number_input("KI (下檔保護價 %)", value=65.0, step=1.0, format="%.1f")
 
 st.sidebar.divider()
-st.sidebar.header("3️⃣ 投資與配息設定") # [新增功能]
+st.sidebar.header("3️⃣ 投資與配息設定")
 principal = st.sidebar.number_input("投資本金 (例如 USD)", value=100000, step=10000, help="輸入客戶預計投資的金額")
 coupon_pa = st.sidebar.number_input("年化配息率 (Coupon %)", value=8.0, step=0.5, format="%.1f")
 
@@ -214,17 +214,15 @@ if run_btn:
             c4.metric(f"Strike ({strike_pct}%)", f"{p_st:.2f}", help="期初價格或接股成本")
 
             # ==========================================
-            # [新增區塊] 💰 潛在配息試算
+            # [修正區塊] 💰 潛在配息試算 (只留本金與月配息)
             # ==========================================
             # 計算邏輯
             monthly_income = principal * (coupon_pa / 100) / 12
-            total_income_period = monthly_income * period_months
             
             st.markdown("#### 💰 潛在現金流試算 (Income Analysis)")
-            m1, m2, m3 = st.columns(3)
+            m1, m2 = st.columns(2) # 改為兩欄
             m1.metric("投資本金", f"${principal:,.0f}")
             m2.metric("預估每月配息", f"${monthly_income:,.0f}", help=f"計算公式: 本金 x {coupon_pa}% / 12")
-            m3.metric(f"持有{period_months}個月總配息", f"${total_income_period:,.0f}", help="假設持有至滿期且未提前出場之總領息")
             st.divider()
 
             # ==========================================
