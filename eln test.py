@@ -7,8 +7,47 @@ from datetime import datetime, timedelta
 
 # --- 1. 基礎設定 ---
 st.set_page_config(page_title="結構型商品戰情室 (V10.3)", layout="wide")
+
+# ==========================================
+# 🔐 密碼保護機制 (Password Protection)
+# ==========================================
+def check_password():
+    """Returns `True` if the user had the correct password."""
+
+    def password_entered():
+        """Checks whether a password entered by the user is correct."""
+        if st.session_state["password"] == "5428":
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # don't store password
+        else:
+            st.session_state["password_correct"] = False
+
+    if "password_correct" not in st.session_state:
+        # First run, show input for password.
+        st.text_input(
+            "請輸入系統密碼 (Access Code)", type="password", on_change=password_entered, key="password"
+        )
+        return False
+    elif not st.session_state["password_correct"]:
+        # Password incorrect, show input + error.
+        st.text_input(
+            "請輸入系統密碼 (Access Code)", type="password", on_change=password_entered, key="password"
+        )
+        st.error("❌ 密碼錯誤 (Incorrect Password)")
+        return False
+    else:
+        # Password correct.
+        return True
+
+if not check_password():
+    st.stop()  # 如果密碼沒過，程式停止執行，不顯示下方內容
+
+# ==========================================
+# 🔓 主程式開始 (Main App)
+# ==========================================
+
 st.title("📊 結構型商品 - 關鍵點位與長週期風險回測")
-st.markdown("回測區間：**2009/01/01 至今**。報告順序優化：**獲利潛力 -> 安全性 -> 解套時間**。")
+st.markdown("回測區間：**2009/01/01 至今**。**已登入授權模式**。")
 st.divider()
 
 # --- 2. 側邊欄：參數設定 ---
@@ -214,13 +253,12 @@ if run_btn:
             c4.metric(f"Strike ({strike_pct}%)", f"{p_st:.2f}", help="期初價格或接股成本")
 
             # ==========================================
-            # [修正區塊] 💰 潛在配息試算 (只留本金與月配息)
+            # [功能] 💰 潛在配息試算 (精簡版)
             # ==========================================
-            # 計算邏輯
             monthly_income = principal * (coupon_pa / 100) / 12
             
             st.markdown("#### 💰 潛在現金流試算 (Income Analysis)")
-            m1, m2 = st.columns(2) # 改為兩欄
+            m1, m2 = st.columns(2)
             m1.metric("投資本金", f"${principal:,.0f}")
             m2.metric("預估每月配息", f"${monthly_income:,.0f}", help=f"計算公式: 本金 x {coupon_pa}% / 12")
             st.divider()
@@ -232,7 +270,7 @@ if run_btn:
             st.plotly_chart(fig_main, use_container_width=True)
 
             # ==========================================
-            # 3. 藍底解釋 (AI 解讀) - 已調整順序
+            # 3. 藍底解釋 (AI 解讀)
             # ==========================================
             loss_pct = 100 - stats['safety_prob']
             stuck_rate = 0
